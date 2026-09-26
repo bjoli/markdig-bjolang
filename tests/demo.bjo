@@ -1,0 +1,98 @@
+;; This Source Code Form is subject to the terms of the Mozilla Public
+;; License, v. 2.0. If a copy of the MPL was not distributed with this
+;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+;; markdig-bjolang/tests/demo.bjo — every kind of node, read and printed.
+;;
+;;     bjo run tests/demo.bjo
+;;
+;; Markdown in, and the tree out as s-expressions by `md->sexp`: one block to
+;; a line, then the footnotes, then the front matter.
+
+(import (std prelude))
+(import (std simpletest))
+(import (markdig-bjolang core))
+
+(: tree (-> string string))
+(defun (tree text) (md->sexp (parse-markdown text)))
+
+;; The text of the first paragraph, markup aside.
+(: first-text (-> string string))
+(defun (first-text text)
+  (match (vec-ref (record-ref (parse-markdown text) blocks) 0)
+    ((MdParagraph xs) (md-inlines->text xs))
+    (_ "not a paragraph")))
+
+(defun (main args)
+  ;; --- inlines ------------------------------------------------------------------
+  (expect "a heading, emphasis, strong, strikethrough and code"
+          (tree "# Title *em* **strong** ~~gone~~ `code`")
+          "(heading 1 \"Title \" (em \"em\") \" \" (strong \"strong\") \" \" (strike \"gone\") \" \" (code \"code\"))")
+  (expect "a setext heading"
+          (tree "Title\n-----")
+          "(heading 2 \"Title\")")
+  (expect "links and images, with a title and without"
+          (tree "[a link](http://x.org \"T\") and ![img](a.png)")
+          "(para (link \"http://x.org\" \"T\" \"a link\") \" and \" (image \"a.png\" \"\" \"img\"))")
+  (expect "a reference link, resolved"
+          (tree "[x][r]\n\n[r]: http://r.org \"R\"")
+          "(para (link \"http://r.org\" \"R\" \"x\"))")
+  (expect "autolinks: bare, in brackets, and an address"
+          (tree "www.example.com and <https://auto.org> and <a@b.org>")
+          (str "(para (link \"http://www.example.com\" \"\" \"www.example.com\") \" and \""
+               " (link \"https://auto.org\" \"\" \"https://auto.org\") \" and \""
+               " (link \"mailto:a@b.org\" \"\" \"a@b.org\"))"))
+  (expect "raw html, and entities read"
+          (tree "<b>bold</b> &amp; &copy;")
+          "(para (html \"<b>\") \"bold\" (html \"</b>\") \" & ©\")")
+  (expect "soft and hard breaks"
+          (tree "one\ntwo  \nthree\\\nfour")
+          "(para \"one\" (soft-break) \"two\" (hard-break) \"three\" (hard-break) \"four\")")
+  (expect "the text of some inlines"
+          (first-text "Some *em* and [a `link`](x)")
+          "Some em and a link")
+
+  ;; --- blocks ---------------------------------------------------------------------
+  (expect "a quote"
+          (tree "> quoted\n> text")
+          "(quote (para \"quoted\" (soft-break) \"text\"))")
+  (expect "task lists, nested"
+          (tree "- [ ] todo\n- [x] done\n  - nested")
+          (str "(bullets #:start 1 #:loose #f (item (para (checkbox #f) \" todo\"))"
+               " (item (para (checkbox #t) \" done\") (bullets #:start 1 #:loose #f (item (para \"nested\")))))"))
+  (expect "an ordered list from 3, and a loose list"
+          (tree "3. three\n4. four\n\n- a\n\n- b")
+          (str "(ordered #:start 3 #:loose #f (item (para \"three\")) (item (para \"four\")))\n"
+               "(bullets #:start 1 #:loose #t (item (para \"a\")) (item (para \"b\")))"))
+  (expect "fenced code with an info string, and indented code"
+          (tree "```scheme\n(define x 1)\n(f x)\n```\n\n    indented")
+          "(codeblock \"scheme\" \"(define x 1)\\n(f x)\")\n(codeblock \"\" \"indented\")")
+  (expect "a table, aligned, as many alignments as columns"
+          (tree "| a | b | c |\n|:--|:-:|--:|\n| 1 | *2* | 3 |")
+          (str "(table (aligns left center right) (head (row (cell \"a\") (cell \"b\") (cell \"c\")))"
+               " (body (row (cell \"1\") (cell (em \"2\")) (cell \"3\"))))"))
+  (expect "a table without alignment"
+          (tree "| a |\n|---|\n| 1 |")
+          "(table (aligns none) (head (row (cell \"a\"))) (body (row (cell \"1\"))))")
+  (expect "an html block, and a rule"
+          (tree "<div>\nblock\n</div>\n\n***")
+          "(html-block \"<div>\\nblock\\n</div>\")\n(rule)")
+
+  ;; --- the document -----------------------------------------------------------------
+  (expect "footnotes, numbered in the order they are referred to"
+          (tree "b[^b] a[^a]\n\n[^a]: A.\n[^b]: B.")
+          "(para \"b\" (footnote-ref 1) \" a\" (footnote-ref 2))\n(footnotes (footnote 1 (para \"B.\")) (footnote 2 (para \"A.\")))")
+  (expect "front matter is set aside"
+          (tree "---\ntitle: Hi\n---\n\nText.")
+          "(para \"Text.\")\n(front-matter \"title: Hi\")")
+  (expect "no front matter, no footnotes"
+          (tree "Text.")
+          "(para \"Text.\")")
+  (expect "an empty document"
+          (tree "")
+          "")
+  (expect-true "Markdig's own HTML"
+               (string-contains? (markdown->html "~~x~~ *y*") "<del>x</del> <em>y</em>"))
+
+  (println "markdig-bjolang ok")
+  0)

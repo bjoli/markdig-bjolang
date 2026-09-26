@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "Markdig": {
+        "type": "Direct",
+        "requested": "[0.44.0, )",
+        "resolved": "0.44.0",
+        "contentHash": "X+CYMjcUnh/yO24wOSQxVFLiGqWrrtXJ5M7toHiM1Zk4Fg9UMLN5fkaq6FSOWH+mIprsHHgDMlq3MJhmrXalhg=="
+      }
+    }
+  }
+}

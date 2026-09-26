@@ -1,0 +1,100 @@
+* markdig-bjolang — Markdown, as Bjolang values
+
+Markdown, GitHub flavoured, read by [[https://github.com/xoofx/markdig][Markdig]]
+and handed over as Bjolang unions and records. Markdig's own tree is classes,
+with nulls, sibling pointers and a node per piece of syntax; this turns it into
+a tree of values once, so that nothing using the result needs to know Markdig
+is there.
+
+#+BEGIN_SRC scheme
+(import (markdig-bjolang core))
+
+(def doc (parse-markdown "# Hi\n\nSome *text*, and a [link](https://example.com)."))
+
+(record-ref doc blocks)
+;; [(MdHeading 1 [(MdText "Hi")])
+;;  (MdParagraph [(MdText "Some ") (MdEmph [(MdText "text")]) (MdText ", and a ")
+;;                (MdLink "https://example.com" "" [(MdText "link")]) (MdText ".")])]
+#+END_SRC
+
+** What is read
+
+CommonMark, and what GitHub adds to it: tables, task lists, strikethrough,
+autolinks (~www.example.com~ with no brackets too) and footnotes. A YAML front
+matter block at the start is set aside, as text, rather than read as Markdown.
+
+** The tree
+
+#+BEGIN_SRC scheme
+(: MdInline (Union (MdText string) (MdCode string)
+                   (MdEmph (Vec MdInline)) (MdStrong (Vec MdInline)) (MdStrike (Vec MdInline))
+                   (MdLink string string (Vec MdInline))    ; url, title ("" for none), text
+                   (MdImage string string (Vec MdInline))   ; url, title, description
+                   MdSoftBreak MdHardBreak
+                   (MdHtml string)                          ; raw HTML among the text
+                   (MdCheckbox bool)                        ; a task list item's [ ] or [x]
+                   (MdFootnoteRef int)))                    ; the footnote's number
+
+(: MdBlock (Union (MdParagraph (Vec MdInline)) (MdHeading int (Vec MdInline))
+                  (MdCodeBlock string string)               ; info string ("" for none), code
+                  (MdQuote (Vec MdBlock))
+                  (MdListBlock MdList) MdRule
+                  (MdHtmlBlock string)
+                  (MdTableBlock MdTable)))
+
+(: MdList (Record (: ordered bool) (: start int) (: loose bool) (: items (Vec (Vec MdBlock)))))
+(: MdTable (Record (: aligns (Vec MdAlign))                 ; MdAlignNone MdAlignLeft MdAlignCenter MdAlignRight
+                   (: head (Vec (Vec (Vec MdInline))))      ; rows of cells of text
+                   (: body (Vec (Vec (Vec MdInline))))))
+
+(: MdDocument (Record (: blocks (Vec MdBlock))
+                      (: footnotes (Vec (Tuple int (Vec MdBlock))))
+                      (: front-matter (Option string))))
+#+END_SRC
+
+Everything is prefixed ~Md~, so that the types can stand beside another
+document tree's — a converter from this one to that one imports both.
+
+Some choices, made once here so that a user of the tree need not:
+
+- Text Markdig split into pieces is joined again: two ~MdText~ are never
+  adjacent.
+- An entity is its character: ~&copy;~ is ~(MdText "©")~.
+- A link reference is resolved: ~[x][r]~ is an ~MdLink~ to what ~[r]~ says,
+  and the definition itself is not a block.
+- An autolink is an ~MdLink~ whose text is its address; an email address gets
+  ~mailto:~.
+- A task list item's box is the ~MdCheckbox~ its first paragraph begins with.
+- Footnotes are numbered in the order they are referred to, and kept apart
+  from the blocks; an ~MdFootnoteRef~ says which.
+
+** The functions
+
+| ~(parse-markdown text)~     | the ~MdDocument~                                |
+| ~(markdown->html text)~     | Markdig's own HTML, for when no tree is wanted  |
+| ~(md-inlines->text xs)~     | the text of some inlines, markup aside          |
+| ~(md->sexp doc)~            | the tree as s-expressions, for tests and for looking |
+
+** Installing it
+
+#+BEGIN_SRC scheme
+(depends
+  (package (name (markdig-bjolang))
+           (version (version-at-least "0.1.0"))
+           (source (git (url "https://github.com/bjoli/markdig-bjolang")))))
+#+END_SRC
+
+The package declares Markdig as a NuGet package, and a program using it
+declares nothing itself. Building one needs the .NET SDK's ~dotnet~ command,
+which restores it; see ~Docs/Projects.org~ in Bjolang, "NuGet packages", for
+what that means for where the program runs.
+
+** Running the tests
+
+#+BEGIN_SRC sh
+bjo run tests/demo.bjo      ;; 20 checks: every kind of node
+#+END_SRC
+
+** Licence
+
+MPL-2.0. Markdig is BSD-2-Clause.

@@ -1,0 +1,14 @@
+(package
+  (name (markdig-bjolang))
+  (version "0.1.0")
+  (description "Markdown for Bjolang: Markdig's parser, GitHub flavoured, and its tree in Bjolang's own types.")
+  (license "MPL-2.0")
+
+  ;; Markdig (BSD-2-Clause) does the parsing. A program using this package
+  ;; declares nothing itself; building one needs the .NET SDK's dotnet
+  ;; command, which restores the package.
+  (packages
+    (nuget (id "Markdig") (version "0.44.0")))
+
+  ;; A library: there is no src/main.bjo.
+  )

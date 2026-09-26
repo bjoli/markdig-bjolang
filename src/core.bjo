@@ -1,0 +1,508 @@
+;; This Source Code Form is subject to the terms of the Mozilla Public
+;; License, v. 2.0. If a copy of the MPL was not distributed with this
+;; file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+;; markdig-bjolang/src/core.bjo — the module (markdig-bjolang core).
+;;
+;; Markdown, GitHub flavoured, read by Markdig and handed over as Bjolang
+;; values. Markdig's own tree is classes, with nulls and sibling pointers; this
+;; turns it into unions and vecs once, so that nothing that uses the result
+;; needs to know Markdig is there:
+;;
+;;     (def doc (parse-markdown "# Hi\n\nSome *text*."))
+;;     (record-ref doc blocks)
+;;     ;; => [(MdHeading 1 [(MdText "Hi")]) (MdParagraph [(MdText "Some ") (MdEmph [(MdText "text")]) (MdText ".")])]
+;;
+;; What is read is CommonMark with GitHub's extensions: tables, task lists,
+;; strikethrough, autolinks and footnotes, and a YAML front matter block,
+;; which is set aside rather than read as Markdown.
+;;
+;; `markdown->html` is Markdig's own HTML, for when the tree is not wanted.
+
+(export
+  MdDocument MdBlock MdInline MdList MdTable MdAlign
+  parse-markdown markdown->html
+  md-inlines->text
+  md->sexp md-blocks->sexp md-inlines->sexp)
+
+(import (std prelude))
+(import (text bjodat-core))
+
+;; ---------------------------------------------------------------------------
+;; The tree
+;; ---------------------------------------------------------------------------
+
+;; A table column's alignment, from its delimiter row: `:--`, `:-:`, `--:`.
+(type (: MdAlign (Union MdAlignNone MdAlignLeft MdAlignCenter MdAlignRight)))
+
+(type-rec
+  (: MdInline (Union (MdText string)
+                     (MdCode string)
+                     (MdEmph (Vec MdInline))
+                     (MdStrong (Vec MdInline))
+                     (MdStrike (Vec MdInline))
+                     ;; Where it goes, its title ("" for none), and its text.
+                     (MdLink string string (Vec MdInline))
+                     ;; The image's address, its title, and its description.
+                     (MdImage string string (Vec MdInline))
+                     ;; A line break in the source, which is a space.
+                     MdSoftBreak
+                     ;; A line break that is one: two spaces or a \ at the end.
+                     MdHardBreak
+                     ;; Raw HTML among the text, as written.
+                     (MdHtml string)
+                     ;; A task list item's [ ] or [x].
+                     (MdCheckbox bool)
+                     ;; A reference to the footnote of that number.
+                     (MdFootnoteRef int)))
+  ;; Whether it is numbered, the number it starts at, whether its items are
+  ;; paragraphs apart (loose) or not, and the items.
+  (: MdList (Record (: ordered bool)
+                    (: start int)
+                    (: loose bool)
+                    (: items (Vec (Vec MdBlock)))))
+  ;; One alignment per column; the head's rows and the body's, each a row of
+  ;; cells of text.
+  (: MdTable (Record (: aligns (Vec MdAlign))
+                     (: head (Vec (Vec (Vec MdInline))))
+                     (: body (Vec (Vec (Vec MdInline))))))
+  (: MdBlock (Union (MdParagraph (Vec MdInline))
+                    (MdHeading int (Vec MdInline))
+                    ;; The info string — "scheme", or "" — and the code.
+                    (MdCodeBlock string string)
+                    (MdQuote (Vec MdBlock))
+                    (MdListBlock MdList)
+                    MdRule
+                    (MdHtmlBlock string)
+                    (MdTableBlock MdTable))))
+
+;; The blocks; the footnotes, numbered as they are referred to; and the YAML
+;; front matter's text, when the document began with one.
+(type (: MdDocument (Record (: blocks (Vec MdBlock))
+                            (: footnotes (Vec (Tuple int (Vec MdBlock))))
+                            (: front-matter (Option string)))))
+
+;; ---------------------------------------------------------------------------
+;; Markdig
+;; ---------------------------------------------------------------------------
+
+(import/class
+  (Object          (: System.Object))
+  (PipelineBuilder (: Markdig.MarkdownPipelineBuilder (-> PipelineBuilder)))
+  (Pipeline        (: Markdig.MarkdownPipeline))
+  (ParserContext   (: Markdig.MarkdownParserContext (-> ParserContext)))
+  (PipeTableOptions (: Markdig.Extensions.Tables.PipeTableOptions (-> PipeTableOptions)))
+  (AutoLinkOptions (: Markdig.Extensions.AutoLinks.AutoLinkOptions (-> AutoLinkOptions)))
+  (EmphasisExtras  (: Markdig.Extensions.EmphasisExtras.EmphasisExtraOptions))
+  (MarkdigDocument (: Markdig.Syntax.MarkdownDocument))
+  (Block           (: Markdig.Syntax.Block))
+  (ContainerBlock  (: Markdig.Syntax.ContainerBlock))
+  (LeafBlock       (: Markdig.Syntax.LeafBlock))
+  (Lines           (: Markdig.Helpers.StringLineGroup))
+  (Slice           (: Markdig.Helpers.StringSlice))
+  (Inline          (: Markdig.Syntax.Inlines.Inline))
+  (ContainerInline (: Markdig.Syntax.Inlines.ContainerInline))
+  (ColumnDefinition (: Markdig.Extensions.Tables.TableColumnDefinition))
+  (ColumnAlign     (: Markdig.Extensions.Tables.TableColumnAlign)))
+
+(import/extern
+  ;; --- the pipeline ---
+  (use-pipe-tables (: Markdig.MarkdownExtensions.UsePipeTables
+                      (-> PipelineBuilder PipeTableOptions PipelineBuilder)))
+  (use-task-lists  (: Markdig.MarkdownExtensions.UseTaskLists (-> PipelineBuilder PipelineBuilder)))
+  (use-emphasis-extras (: Markdig.MarkdownExtensions.UseEmphasisExtras
+                          (-> PipelineBuilder EmphasisExtras PipelineBuilder)))
+  (use-auto-links  (: Markdig.MarkdownExtensions.UseAutoLinks
+                      (-> PipelineBuilder AutoLinkOptions PipelineBuilder)))
+  (use-footnotes   (: Markdig.MarkdownExtensions.UseFootnotes (-> PipelineBuilder PipelineBuilder)))
+  (use-front-matter (: Markdig.MarkdownExtensions.UseYamlFrontMatter (-> PipelineBuilder PipelineBuilder)))
+  (build-pipeline  (: Markdig.MarkdownPipelineBuilder.Build (-> PipelineBuilder Pipeline)))
+  (markdig-parse   (: Markdig.Markdown.Parse (-> string Pipeline ParserContext MarkdigDocument)))
+  (markdig-html    (: Markdig.Markdown.ToHtml (-> string Pipeline ParserContext string)))
+
+  ;; --- blocks ---
+  (leaf-inline     (: Markdig.Syntax.LeafBlock.Inline (-> LeafBlock ContainerInline) #:get))
+  (leaf-lines      (: Markdig.Syntax.LeafBlock.Lines (-> LeafBlock Lines) #:get))
+  (heading-level   (: Markdig.Syntax.HeadingBlock.Level (-> Markdig.Syntax.HeadingBlock int) #:get))
+  (fence-info      (: Markdig.Syntax.FencedCodeBlock.Info (-> Markdig.Syntax.FencedCodeBlock string) #:get))
+  (list-ordered?   (: Markdig.Syntax.ListBlock.IsOrdered (-> Markdig.Syntax.ListBlock bool) #:get))
+  (list-start      (: Markdig.Syntax.ListBlock.OrderedStart (-> Markdig.Syntax.ListBlock string) #:get))
+  (list-loose?     (: Markdig.Syntax.ListBlock.IsLoose (-> Markdig.Syntax.ListBlock bool) #:get))
+  (table-columns   (: Markdig.Extensions.Tables.Table.ColumnDefinitions
+                      (-> Markdig.Extensions.Tables.Table (System.Collections.Generic.List ColumnDefinition)) #:get))
+  (column-align    (: Markdig.Extensions.Tables.TableColumnDefinition.Alignment
+                      (-> ColumnDefinition (System.Nullable ColumnAlign)) #:get))
+  (row-header?     (: Markdig.Extensions.Tables.TableRow.IsHeader (-> Markdig.Extensions.Tables.TableRow bool) #:get))
+  (footnote-order  (: Markdig.Extensions.Footnotes.Footnote.Order (-> Markdig.Extensions.Footnotes.Footnote int) #:get))
+
+  ;; --- inlines ---
+  (first-child     (: Markdig.Syntax.Inlines.ContainerInline.FirstChild (-> ContainerInline Inline) #:get))
+  (next-sibling    (: Markdig.Syntax.Inlines.Inline.NextSibling (-> Inline Inline) #:get))
+  (literal-content (: Markdig.Syntax.Inlines.LiteralInline.Content
+                      (-> Markdig.Syntax.Inlines.LiteralInline Slice) #:get))
+  (code-content    (: Markdig.Syntax.Inlines.CodeInline.Content (-> Markdig.Syntax.Inlines.CodeInline string) #:get))
+  (emphasis-char   (: Markdig.Syntax.Inlines.EmphasisInline.DelimiterChar
+                      (-> Markdig.Syntax.Inlines.EmphasisInline System.Char) #:get))
+  (emphasis-count  (: Markdig.Syntax.Inlines.EmphasisInline.DelimiterCount
+                      (-> Markdig.Syntax.Inlines.EmphasisInline int) #:get))
+  (link-url        (: Markdig.Syntax.Inlines.LinkInline.Url (-> Markdig.Syntax.Inlines.LinkInline string) #:get))
+  (link-title      (: Markdig.Syntax.Inlines.LinkInline.Title (-> Markdig.Syntax.Inlines.LinkInline string) #:get))
+  (link-image?     (: Markdig.Syntax.Inlines.LinkInline.IsImage (-> Markdig.Syntax.Inlines.LinkInline bool) #:get))
+  (autolink-url    (: Markdig.Syntax.Inlines.AutolinkInline.Url (-> Markdig.Syntax.Inlines.AutolinkInline string) #:get))
+  (autolink-email? (: Markdig.Syntax.Inlines.AutolinkInline.IsEmail (-> Markdig.Syntax.Inlines.AutolinkInline bool) #:get))
+  (break-hard?     (: Markdig.Syntax.Inlines.LineBreakInline.IsHard (-> Markdig.Syntax.Inlines.LineBreakInline bool) #:get))
+  (html-tag        (: Markdig.Syntax.Inlines.HtmlInline.Tag (-> Markdig.Syntax.Inlines.HtmlInline string) #:get))
+  (entity-text     (: Markdig.Syntax.Inlines.HtmlEntityInline.Transcoded
+                      (-> Markdig.Syntax.Inlines.HtmlEntityInline Slice) #:get))
+  (task-checked?   (: Markdig.Extensions.TaskLists.TaskList.Checked (-> Markdig.Extensions.TaskLists.TaskList bool) #:get))
+  (footnote-link-back? (: Markdig.Extensions.Footnotes.FootnoteLink.IsBackLink
+                          (-> Markdig.Extensions.Footnotes.FootnoteLink bool) #:get))
+  (footnote-link-note (: Markdig.Extensions.Footnotes.FootnoteLink.Footnote
+                         (-> Markdig.Extensions.Footnotes.FootnoteLink Markdig.Extensions.Footnotes.Footnote) #:get))
+
+  ;; --- strings that may be null ---
+  (null-or-empty?  (: System.String.IsNullOrEmpty (-> string bool))))
+
+;; CommonMark with GitHub's extensions. Built once.
+(: gfm Pipeline)
+(def gfm
+  (build-pipeline
+    (use-front-matter
+      (use-footnotes
+        (use-auto-links
+          (use-emphasis-extras
+            (use-task-lists (use-pipe-tables (PipelineBuilder.) (PipeTableOptions.)))
+            EmphasisExtras.Strikethrough)
+          (AutoLinkOptions.))))))
+
+;; A string Markdig may leave null, as "" when it did.
+(: text-or-empty (-> string string))
+(defun (text-or-empty s) (if (null-or-empty? s) "" s))
+
+;; ---------------------------------------------------------------------------
+;; Blocks
+;; ---------------------------------------------------------------------------
+
+(: children (-> ContainerBlock (Vec Block)))
+(defun (children c)
+  (loop (:for b (cast (Seq Block) c))
+        (:acc (vecing b))))
+
+(: lines-text (-> LeafBlock string))
+(defun (lines-text leaf) (.ToString (leaf-lines leaf)))
+
+;; The inlines of a leaf block — none when Markdig left it without.
+(: leaf-inlines (-> LeafBlock (Vec MdInline)))
+(defun (leaf-inlines leaf)
+  (match (cast Object (leaf-inline leaf))
+    ((:is Markdig.Syntax.Inlines.ContainerInline c) (convert-inlines c))
+    (_ (vec-empty))))
+
+(: convert-blocks (-> ContainerBlock (Vec MdBlock)))
+(defun (convert-blocks c)
+  (loop (:for b (children c))
+        (:acc out (folding (vec-empty) (vec-merge out (convert-block b))))))
+
+(: align-of (-> ColumnDefinition MdAlign))
+(defun (align-of d)
+  (match (cast Object (column-align d))
+    ((:is Markdig.Extensions.Tables.TableColumnAlign a)
+     (match (.ToString a)
+       ("Left" MdAlignLeft)
+       ("Center" MdAlignCenter)
+       ("Right" MdAlignRight)
+       (_ MdAlignNone)))
+    (_ MdAlignNone)))
+
+;; A cell is a container of paragraphs, usually one; its text is theirs.
+(: cell-inlines (-> Block (Vec MdInline)))
+(defun (cell-inlines cell)
+  (match (cast Object cell)
+    ((:is Markdig.Syntax.ContainerBlock c)
+     (loop (:for b (children c))
+           (:acc out (folding (vec-empty)
+                              (match (cast Object b)
+                                ((:is Markdig.Syntax.LeafBlock leaf)
+                                 (vec-merge (if (vec-empty? out) out (vec-add out MdSoftBreak))
+                                            (leaf-inlines leaf)))
+                                (_ out))))))
+    (_ (vec-empty))))
+
+(: row-cells (-> Block (Vec (Vec MdInline))))
+(defun (row-cells row)
+  (match (cast Object row)
+    ((:is Markdig.Syntax.ContainerBlock c) (vec-map cell-inlines (children c)))
+    (_ (vec-empty))))
+
+(: row-is-head? (-> Block bool))
+(defun (row-is-head? row)
+  (match (cast Object row)
+    ((:is Markdig.Extensions.Tables.TableRow r) (row-header? r))
+    (_ #f)))
+
+;; Markdig keeps a column definition more than there are columns, so the
+;; alignments are as many as the widest row has cells.
+(: convert-table (-> Markdig.Extensions.Tables.Table MdTable))
+(defun (convert-table t)
+  (def rows (children (cast ContainerBlock t)))
+  (def head (vec-map row-cells (vec-filter row-is-head? rows)))
+  (def body (vec-map row-cells (vec-filter (fun (r) (not (row-is-head? r))) rows)))
+  (def columns (loop (:for row (vec-merge head body))
+                     (:acc widest (folding 0 (if (> (vec-length row) widest) (vec-length row) widest)))))
+  (def defined (loop (:for d (cast (Seq ColumnDefinition) (table-columns t)))
+                     (:acc (vecing (align-of d)))))
+  (MdTable (aligns (loop (:for i (up-from 0 #:to columns))
+                         (:acc (vecing (if (< i (vec-length defined)) (vec-ref defined i) MdAlignNone)))))
+           (head head)
+           (body body)))
+
+(: list-start-number (-> Markdig.Syntax.ListBlock int))
+(defun (list-start-number l)
+  (def s (list-start l))
+  (if (or (not (list-ordered? l)) (null-or-empty? s)) 1 (string->int s)))
+
+(: convert-list (-> Markdig.Syntax.ListBlock MdList))
+(defun (convert-list l)
+  (MdList (ordered (list-ordered? l))
+          (start (list-start-number l))
+          (loose (list-loose? l))
+          (items (loop (:for item (children (cast ContainerBlock l)))
+                       (:acc (vecing (match (cast Object item)
+                                       ((:is Markdig.Syntax.ContainerBlock c) (convert-blocks c))
+                                       (_ (vec-empty)))))))))
+
+;; What a block of Markdig's is here. Most are one block; a link reference
+;; definition, the front matter and the footnotes are none, since they are
+;; not where they stand.
+(: convert-block (-> Block (Vec MdBlock)))
+(defun (convert-block b)
+  (match (cast Object b)
+    ((:is Markdig.Syntax.ParagraphBlock p) [(MdParagraph (leaf-inlines (cast LeafBlock p)))])
+    ((:is Markdig.Syntax.HeadingBlock h) [(MdHeading (heading-level h) (leaf-inlines (cast LeafBlock h)))])
+    ((:is Markdig.Extensions.Yaml.YamlFrontMatterBlock y) (vec-empty))
+    ((:is Markdig.Syntax.FencedCodeBlock f)
+     [(MdCodeBlock (text-or-empty (fence-info f)) (lines-text (cast LeafBlock f)))])
+    ((:is Markdig.Syntax.CodeBlock c) [(MdCodeBlock "" (lines-text (cast LeafBlock c)))])
+    ((:is Markdig.Syntax.HtmlBlock h) [(MdHtmlBlock (lines-text (cast LeafBlock h)))])
+    ((:is Markdig.Syntax.ThematicBreakBlock t) [MdRule])
+    ((:is Markdig.Syntax.QuoteBlock q) [(MdQuote (convert-blocks (cast ContainerBlock q)))])
+    ((:is Markdig.Syntax.ListBlock l) [(MdListBlock (convert-list l))])
+    ((:is Markdig.Extensions.Tables.Table t) [(MdTableBlock (convert-table t))])
+    ((:is Markdig.Extensions.Footnotes.FootnoteGroup g) (vec-empty))
+    ((:is Markdig.Syntax.LinkReferenceDefinitionGroup g) (vec-empty))
+    ((:is Markdig.Syntax.ContainerBlock c) (convert-blocks c))
+    ((:is Markdig.Syntax.LeafBlock leaf) (let ((xs (leaf-inlines leaf)))
+                                          (if (vec-empty? xs) (vec-empty) [(MdParagraph xs)])))
+    (_ (vec-empty))))
+
+;; ---------------------------------------------------------------------------
+;; Inlines
+;; ---------------------------------------------------------------------------
+
+(: inline-children (-> ContainerInline (Vec Inline)))
+(defun (inline-children c)
+  (let go ((node (cast Object (first-child c))) (out (vec-empty)))
+    ;; Cast again: a named let's variable has no type yet where this looks.
+    (match (cast Object node)
+      ((:is Markdig.Syntax.Inlines.Inline i) (go (cast Object (next-sibling i)) (vec-add out i)))
+      (_ out))))
+
+;; Markdig splits text where an inline might have begun; adjacent text is
+;; joined again.
+(: push-text (-> (Vec MdInline) MdInline (Vec MdInline)))
+(defun (push-text out x)
+  (match x
+    ((MdText s)
+     (cond
+       ((string-empty? s) out)
+       ((vec-empty? out) (vec-add out x))
+       (else
+        (def last (- (vec-length out) 1))
+        (match (vec-ref out last)
+          ((MdText before) (vec-set out last (MdText (str before s))))
+          (_ (vec-add out x))))))
+    (_ (vec-add out x))))
+
+(: convert-inlines (-> ContainerInline (Vec MdInline)))
+(defun (convert-inlines c)
+  (loop (:for i (inline-children c))
+        (:acc out (folding (vec-empty)
+                           (loop (:for x (convert-inline i))
+                                 (:acc more (folding out (push-text more x))))))))
+
+(: emphasis (-> Markdig.Syntax.Inlines.EmphasisInline (Vec MdInline)))
+(defun (emphasis e)
+  (def inner (convert-inlines (cast ContainerInline e)))
+  (cond
+    ;; A .NET char is not a Bjolang one; compared as text.
+    ((= (.ToString (emphasis-char e)) "~") [(MdStrike inner)])
+    ((>= (emphasis-count e) 2) [(MdStrong inner)])
+    (else [(MdEmph inner)])))
+
+(: convert-inline (-> Inline (Vec MdInline)))
+(defun (convert-inline i)
+  (match (cast Object i)
+    ((:is Markdig.Syntax.Inlines.LiteralInline l) [(MdText (.ToString (literal-content l)))])
+    ((:is Markdig.Syntax.Inlines.CodeInline c) [(MdCode (code-content c))])
+    ((:is Markdig.Syntax.Inlines.EmphasisInline e) (emphasis e))
+    ((:is Markdig.Syntax.Inlines.LinkInline l)
+     (def inner (convert-inlines (cast ContainerInline l)))
+     (def url (text-or-empty (link-url l)))
+     (def title (text-or-empty (link-title l)))
+     (if (link-image? l) [(MdImage url title inner)] [(MdLink url title inner)]))
+    ((:is Markdig.Syntax.Inlines.AutolinkInline a)
+     (def url (text-or-empty (autolink-url a)))
+     [(MdLink (if (autolink-email? a) (str "mailto:" url) url) "" [(MdText url)])])
+    ((:is Markdig.Syntax.Inlines.LineBreakInline b) [(if (break-hard? b) MdHardBreak MdSoftBreak)])
+    ((:is Markdig.Syntax.Inlines.HtmlInline h) [(MdHtml (text-or-empty (html-tag h)))])
+    ((:is Markdig.Syntax.Inlines.HtmlEntityInline e) [(MdText (.ToString (entity-text e)))])
+    ((:is Markdig.Extensions.TaskLists.TaskList t) [(MdCheckbox (task-checked? t))])
+    ((:is Markdig.Extensions.Footnotes.FootnoteLink f)
+     (if (footnote-link-back? f) (vec-empty) [(MdFootnoteRef (footnote-order (footnote-link-note f)))]))
+    ((:is Markdig.Syntax.Inlines.ContainerInline c) (convert-inlines c))
+    (_ (vec-empty))))
+
+;; ---------------------------------------------------------------------------
+;; A document
+;; ---------------------------------------------------------------------------
+
+(: footnotes-of (-> (Vec Block) (Vec (Tuple int (Vec MdBlock)))))
+(defun (footnotes-of top)
+  (loop (:for b top)
+        (:acc out (folding (vec-empty)
+                           (match (cast Object b)
+                             ((:is Markdig.Extensions.Footnotes.FootnoteGroup g)
+                              (vec-merge out (vec-map footnote-of (children (cast ContainerBlock g)))))
+                             (_ out))))))
+
+(: footnote-of (-> Block (Tuple int (Vec MdBlock))))
+(defun (footnote-of note)
+  (match (cast Object note)
+    ((:is Markdig.Extensions.Footnotes.Footnote f)
+     (Tuple (footnote-order f) (convert-blocks (cast ContainerBlock f))))
+    (_ (Tuple 0 (vec-empty)))))
+
+(: front-matter-of (-> (Vec Block) (Option string)))
+(defun (front-matter-of top)
+  (loop (:for b top)
+        (:acc found (folding None
+                             (match (Tuple found (cast Object b))
+                               ((Tuple None (:is Markdig.Extensions.Yaml.YamlFrontMatterBlock y))
+                                (Some (lines-text (cast LeafBlock y))))
+                               (_ found))))))
+
+;; Reads Markdown, GitHub flavoured.
+(: parse-markdown (-> string MdDocument))
+(defun (parse-markdown text)
+  (def doc (markdig-parse text gfm (ParserContext.)))
+  (def top (children (cast ContainerBlock doc)))
+  (MdDocument (blocks (convert-blocks (cast ContainerBlock doc)))
+              (footnotes (footnotes-of top))
+              (front-matter (front-matter-of top))))
+
+;; Markdig's HTML for the same Markdown.
+(: markdown->html (-> string string))
+(defun (markdown->html text)
+  (markdig-html text gfm (ParserContext.)))
+
+;; ---------------------------------------------------------------------------
+;; Text, and s-expressions
+;; ---------------------------------------------------------------------------
+
+;; The text of some inlines, markup aside.
+(: md-inlines->text (-> (Vec MdInline) string))
+(defun (md-inlines->text xs)
+  (string-join (vec-map (fun (x)
+                          (match x
+                            ((MdText s) s)
+                            ((MdCode s) s)
+                            ((MdEmph ys) (md-inlines->text ys))
+                            ((MdStrong ys) (md-inlines->text ys))
+                            ((MdStrike ys) (md-inlines->text ys))
+                            ((MdLink url title ys) (md-inlines->text ys))
+                            ((MdImage url title ys) (md-inlines->text ys))
+                            (MdSoftBreak " ")
+                            (MdHardBreak " ")
+                            (_ "")))
+                        xs)
+               ""))
+
+(: quoted (-> string string))
+(defun (quoted s) (bjodat->string (BjoStr s)))
+
+(: form (-> string (Vec string) string))
+(defun (form head parts)
+  (if (vec-empty? parts) (str "(" head ")") (str "(" head " " (string-join parts " ") ")")))
+
+(: md-inlines->sexp (-> (Vec MdInline) string))
+(defun (md-inlines->sexp xs) (string-join (vec-map inline->sexp xs) " "))
+
+(: inline->sexp (-> MdInline string))
+(defun (inline->sexp x)
+  (match x
+    ((MdText s) (quoted s))
+    ((MdCode s) (form "code" [(quoted s)]))
+    ((MdEmph ys) (form "em" (vec-map inline->sexp ys)))
+    ((MdStrong ys) (form "strong" (vec-map inline->sexp ys)))
+    ((MdStrike ys) (form "strike" (vec-map inline->sexp ys)))
+    ((MdLink url title ys) (form "link" (vec-merge [(quoted url) (quoted title)] (vec-map inline->sexp ys))))
+    ((MdImage url title ys) (form "image" (vec-merge [(quoted url) (quoted title)] (vec-map inline->sexp ys))))
+    (MdSoftBreak "(soft-break)")
+    (MdHardBreak "(hard-break)")
+    ((MdHtml s) (form "html" [(quoted s)]))
+    ((MdCheckbox checked) (if checked "(checkbox #t)" "(checkbox #f)"))
+    ((MdFootnoteRef n) (form "footnote-ref" [(int->string n)]))))
+
+(: md-blocks->sexp (-> (Vec MdBlock) string))
+(defun (md-blocks->sexp bs) (string-join (vec-map block->sexp bs) " "))
+
+(: align->string (-> MdAlign string))
+(defun (align->string a)
+  (match a
+    (MdAlignNone "none")
+    (MdAlignLeft "left")
+    (MdAlignCenter "center")
+    (MdAlignRight "right")))
+
+(: rows->sexp (-> string (Vec (Vec (Vec MdInline))) string))
+(defun (rows->sexp head rows)
+  (form head (vec-map (fun (row) (form "row" (vec-map (fun (cell) (form "cell" (vec-map inline->sexp cell))) row)))
+                      rows)))
+
+(: block->sexp (-> MdBlock string))
+(defun (block->sexp b)
+  (match b
+    ((MdParagraph xs) (form "para" (vec-map inline->sexp xs)))
+    ((MdHeading level xs) (form "heading" (vec-insert (vec-map inline->sexp xs) 0 (int->string level))))
+    ((MdCodeBlock info code) (form "codeblock" [(quoted info) (quoted code)]))
+    ((MdQuote bs) (form "quote" (vec-map block->sexp bs)))
+    ((MdListBlock l)
+     (form (if (record-ref l ordered) "ordered" "bullets")
+           (vec-merge [(str "#:start " (int->string (record-ref l start)))
+                       (str "#:loose " (if (record-ref l loose) "#t" "#f"))]
+                      (vec-map (fun (item) (form "item" (vec-map block->sexp item))) (record-ref l items)))))
+    (MdRule "(rule)")
+    ((MdHtmlBlock s) (form "html-block" [(quoted s)]))
+    ((MdTableBlock t)
+     (form "table" [(form "aligns" (vec-map align->string (record-ref t aligns)))
+                    (rows->sexp "head" (record-ref t head))
+                    (rows->sexp "body" (record-ref t body))]))))
+
+;; One block to a line, then the footnotes, then the front matter.
+(: md->sexp (-> MdDocument string))
+(defun (md->sexp doc)
+  (def notes (record-ref doc footnotes))
+  (def parts (vec-map block->sexp (record-ref doc blocks)))
+  (def with-notes
+    (if (vec-empty? notes)
+        parts
+        (vec-add parts (form "footnotes"
+                             (vec-map (fun (n)
+                                        (match n
+                                          ((Tuple order bs)
+                                           (form "footnote" (vec-insert (vec-map block->sexp bs) 0 (int->string order))))))
+                                      notes)))))
+  (string-join (match (record-ref doc front-matter)
+                 ((Some yaml) (vec-add with-notes (form "front-matter" [(quoted yaml)])))
+                 (None with-notes))
+               "\n"))
