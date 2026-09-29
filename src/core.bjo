@@ -36,25 +36,25 @@
 (type (: MdAlign (Union MdAlignNone MdAlignLeft MdAlignCenter MdAlignRight)))
 
 (type-rec
-  (: MdInline (Union (MdText string)
-                     (MdCode string)
-                     (MdEmph (Vec MdInline))
-                     (MdStrong (Vec MdInline))
-                     (MdStrike (Vec MdInline))
+  (: MdInline (Union (: MdText string)
+                     (: MdCode string)
+                     (: MdEmph (Vec MdInline))
+                     (: MdStrong (Vec MdInline))
+                     (: MdStrike (Vec MdInline))
                      ;; Where it goes, its title ("" for none), and its text.
-                     (MdLink string string (Vec MdInline))
+                     (: MdLink string string (Vec MdInline))
                      ;; The image's address, its title, and its description.
-                     (MdImage string string (Vec MdInline))
+                     (: MdImage string string (Vec MdInline))
                      ;; A line break in the source, which is a space.
                      MdSoftBreak
                      ;; A line break that is one: two spaces or a \ at the end.
                      MdHardBreak
                      ;; Raw HTML among the text, as written.
-                     (MdHtml string)
+                     (: MdHtml string)
                      ;; A task list item's [ ] or [x].
-                     (MdCheckbox bool)
+                     (: MdCheckbox bool)
                      ;; A reference to the footnote of that number.
-                     (MdFootnoteRef int)))
+                     (: MdFootnoteRef int)))
   ;; Whether it is numbered, the number it starts at, whether its items are
   ;; paragraphs apart (loose) or not, and the items.
   (: MdList (Record (: ordered bool)
@@ -66,15 +66,15 @@
   (: MdTable (Record (: aligns (Vec MdAlign))
                      (: head (Vec (Vec (Vec MdInline))))
                      (: body (Vec (Vec (Vec MdInline))))))
-  (: MdBlock (Union (MdParagraph (Vec MdInline))
-                    (MdHeading int (Vec MdInline))
+  (: MdBlock (Union (: MdParagraph (Vec MdInline))
+                    (: MdHeading int (Vec MdInline))
                     ;; The info string — "scheme", or "" — and the code.
-                    (MdCodeBlock string string)
-                    (MdQuote (Vec MdBlock))
-                    (MdListBlock MdList)
+                    (: MdCodeBlock string string)
+                    (: MdQuote (Vec MdBlock))
+                    (: MdListBlock MdList)
                     MdRule
-                    (MdHtmlBlock string)
-                    (MdTableBlock MdTable))))
+                    (: MdHtmlBlock string)
+                    (: MdTableBlock MdTable))))
 
 ;; The blocks; the footnotes, numbered as they are referred to; and the YAML
 ;; front matter's text, when the document began with one.

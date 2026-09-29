@@ -26,21 +26,21 @@ matter block at the start is set aside, as text, rather than read as Markdown.
 ** The tree
 
 #+BEGIN_SRC scheme
-(: MdInline (Union (MdText string) (MdCode string)
-                   (MdEmph (Vec MdInline)) (MdStrong (Vec MdInline)) (MdStrike (Vec MdInline))
-                   (MdLink string string (Vec MdInline))    ; url, title ("" for none), text
-                   (MdImage string string (Vec MdInline))   ; url, title, description
+(: MdInline (Union (: MdText string) (: MdCode string)
+                   (: MdEmph (Vec MdInline)) (: MdStrong (Vec MdInline)) (: MdStrike (Vec MdInline))
+                   (: MdLink string string (Vec MdInline))    ; url, title ("" for none), text
+                   (: MdImage string string (Vec MdInline))   ; url, title, description
                    MdSoftBreak MdHardBreak
-                   (MdHtml string)                          ; raw HTML among the text
-                   (MdCheckbox bool)                        ; a task list item's [ ] or [x]
-                   (MdFootnoteRef int)))                    ; the footnote's number
+                   (: MdHtml string)                          ; raw HTML among the text
+                   (: MdCheckbox bool)                        ; a task list item's [ ] or [x]
+                   (: MdFootnoteRef int)))                    ; the footnote's number
 
-(: MdBlock (Union (MdParagraph (Vec MdInline)) (MdHeading int (Vec MdInline))
-                  (MdCodeBlock string string)               ; info string ("" for none), code
-                  (MdQuote (Vec MdBlock))
-                  (MdListBlock MdList) MdRule
-                  (MdHtmlBlock string)
-                  (MdTableBlock MdTable)))
+(: MdBlock (Union (: MdParagraph (Vec MdInline)) (: MdHeading int (Vec MdInline))
+                  (: MdCodeBlock string string)               ; info string ("" for none), code
+                  (: MdQuote (Vec MdBlock))
+                  (: MdListBlock MdList) MdRule
+                  (: MdHtmlBlock string)
+                  (: MdTableBlock MdTable)))
 
 (: MdList (Record (: ordered bool) (: start int) (: loose bool) (: items (Vec (Vec MdBlock)))))
 (: MdTable (Record (: aligns (Vec MdAlign))                 ; MdAlignNone MdAlignLeft MdAlignCenter MdAlignRight
